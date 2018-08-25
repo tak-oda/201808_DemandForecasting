@@ -1,0 +1,301 @@
+---
+title: "Demand Forecasting for a retail company (Kaggle Competition)"
+author: "Takeshi Oda"
+date: "2018/08/25"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+## Summary
+This is an individual project regarding prediction of sales demand  in retail business. I applied exploratory data analysis, built timeseries model and generated sales forcast for next three months in 10 different stores.
+The challenge which I delt with was publicly open in Kaggle as 'Store Item Demand Forecasting Challenge'.  
+
+https://www.kaggle.com/c/demand-forecasting-kernels-only
+
+## Dataset
+
+* train.csv
+* test.csv
+
+(https://www.kaggle.com/c/demand-forecasting-kernels-only/data)
+
+
+```{r setup, echo=FALSE}
+library(dplyr)
+library(forecast)
+library(ggplot2)
+```
+
+## Data Loading and data cleansing
+### Data loading  
+
+Training data was loaded. In this data, sales amount of 10 items in 50 stores are recorded at daily basis. Since we can see 500 records per day in the training set, there seems to be no missing observation in training set.
+
+
+```{r loaddata, echo=FALSE}
+
+data <- read.csv(file="data/train.csv", header=TRUE)
+data <- mutate(data, key=paste0(item, store))
+print(paste0("Number of stores:", length(unique(data$store))))
+print(paste0("Number of items:", length(unique(data$item))))
+
+gp1 <- group_by(data, date)
+cnt_by_date <- summarize(gp1, cnt = n())
+
+#Number of records by date: Show head and tail
+head(cnt_by_date,10)
+tail(cnt_by_date,10)
+
+
+```
+## Exploratory Data Analysis 
+
+Before building model, we conducted exploratory data analysis.
+First of all, we take a look at overall trend and seasonality of sales data at all items and all stores.  
+
+### Plot monthly sales at all level
+```{r plot_total, echo=FALSE}
+
+psx <- as.POSIXlt(data$date)
+data$year <- psx$year + 1900
+data$month <- psx$mon + 1
+data <- mutate(data, year_month = year*100 + month)
+
+gp_ym <- group_by(data, year_month, year, month)
+sales_by_ym <- summarize(gp_ym, sales=sum(sales))
+
+plot_line <- function(sales_sub) {
+        sales_sub$month <- as.factor(sales_sub$month)
+        sales_sub$year <- as.factor(sales_sub$year)
+        ggplot(data=sales_sub) + geom_line(aes(x=month, y=sales, group=year, colour=year))
+}
+
+
+
+sales_sub <- subset(sales_by_ym, year %in% c(2013,2014,2015))
+plot_line(sales_sub)
+
+sales_sub <- subset(sales_by_ym, year %in% c(2016,2017))
+plot_line(sales_sub)
+
+```
+
+### Plot monthly sales by all stores and all items
+A decomposition of time series data is presented in below.
+As this chart shows, there is a upward trend in sales for three years.
+Additinally, there is a seasonal movement of sales.
+Auto correlation plot tells us that sales data at a month has positive correlation with sales 10 months later having more than 0.5 of correlation coefficient. 
+
+```{r plot_monthly_all, echo=FALSE}
+
+plot_ts <- function(sales, item){
+        gp_ym <- group_by(sales, year_month)
+        sales_by_ym <- summarize(gp_ym, sales = sum(sales))
+        sales_by_ym <- sales_by_ym[order(sales_by_ym$year_month),]
+        ts <- ts(sales_by_ym$sales, start=c(2013,1), frequency=12)
+        fit <- stl(ts, s.window = "periodic")
+        plot(fit, main=paste0("Decomposition of data into seasonal, trend and remainder components(2013-2017):", item))
+        acf(diff(ts,1), main=paste0("Acf plot Lag-1:", item))
+        pacf(diff(ts,1), main=paste0("Pacf plot Lag-1:", item))
+        
+}
+
+plot_ts(data, "All items")
+
+```
+
+
+### Plot monthly sales by item and all stores
+Next, we are going to ask the question whether same trend is found in all items.
+We split monthly sales data into sections grouped by 10 items and then, apply decomposion
+process on each subset.
+Though I have confirmed decomposition of all items, I will present the first three items among them to reduce spaces.
+```{r plot_monthly_item }
+
+items <- unique(data$item)
+for (i in 1:length(items)){
+        if (i < 3) {
+        item_sales <- subset(data, data$item == items[i])
+        plot_ts(item_sales, items[i])                
+        }
+}
+
+```
+##Modeling Strategy
+Though we could build time series model on sales data at each item and store, that approach might involve huge tasks to maintain models and risk of overfitting due to sparsity of data.
+In addition, we observed that time series data for each item is following almost same trend and cycle. Therefore, we will apply the same model to each combination of item and store. 
+In below, ARIMA model and Exponential Smoothing were built and those performances are displayed.
+
+##Build Time Series forecasting model
+
+### ARIMA model
+Through analyzing autocorrelation plot of time series with 1 degree deffing,
+we would set parater for ARIMA model as follows.  
+
+
+* p=10
+* d=1
+* q=10  
+
+### Exponential Smoothing Model
+Since this time series forms trend and seasonality, we will apply triple exponential smoothing to sales data.
+
+```{r ts1, echo=FALSE}
+
+gp_ym <- group_by(data, year_month)
+sales_by_ym <- summarize(gp_ym, sales = sum(sales))
+sales_by_ym <- sales_by_ym[order(sales_by_ym$year_month),]
+ts <- ts(sales_by_ym$sales, start=c(2013,1), frequency=12)
+fit_arima <- Arima(ts, order=c(10,1,10))
+acc_arima <- accuracy(fit_arima)
+
+exps <- ets(ts, model="AAA") 
+acc_exps <- accuracy(exps)
+
+```
+
+##Comparison of model performance
+Exponential smoothing gave better performance metrics.
+
+```{r compare, echo=FALSE }
+
+comparison <- matrix( nrow=2, ncol=2, 
+                      c(acc_arima[1,2], 
+                        acc_arima[1,5], 
+                        acc_exps[1,2],
+                        acc_exps[1,5])
+)
+rownames(comparison) <- c("RMSE", "MAPE")
+colnames(comparison) <- c("ARIMA", "Exponential Smoothing")
+comparison
+
+df_actual <- as.data.frame(sales_by_ym)
+df_actual$type = rep("Actual", nrow(df_actual))
+
+df_arima <- as.data.frame(sales_by_ym)
+df_arima$sales <- as.numeric(fit_arima$fitted)
+df_arima$type <- rep("ARIMA", nrow(df_arima))
+
+df_exps <- as.data.frame(sales_by_ym)
+df_exps$sales <- as.numeric(exps$fitted)
+df_exps$type <- rep("Exponential Smoothing", nrow(df_exps))
+
+df_comparison <- rbind(df_actual, df_arima)
+df_comparison <- rbind(df_comparison, df_exps)
+
+plot_fit <- function(sales) {
+
+        sales$year_month <- as.factor(sales$year_month)
+        ggplot(data=sales) + geom_line(aes(x=year_month, y=sales, group=type, colour=type))
+}
+plot_fit(df_comparison)
+
+
+```
+
+
+
+## Prediction
+Since we built forecasting model on monthly aggregates of sales data,
+we will apply same model to generate prediction of sales for each combination of store and item.
+After gaining predicted sales for next three months, we will break them into
+prediction at daily level. 
+
+We will calculate proportion of daily sales over total monthly sales from training set and  the ratio and monthly prediction.
+
+
+
+```{r predict, echo=FALSE}
+
+#Aggreage by yearmonth, store and item
+gp <- group_by(data, year_month, item, store)
+sales_by_ym_item_store <- summarize(gp, sales = sum(sales))
+sales_by_ym_item_store <- mutate(sales_by_ym_item_store, key=paste0(item, store))
+
+#Create time series object
+keylist <- unique(sales_by_ym_item_store$key)
+
+all_pred <- data.frame()
+
+for (i in 1: length(keylist)) {
+        keyset <- subset(sales_by_ym_item_store, key == keylist[i])
+        keyset <- keyset[order(keyset$year_month, decreasing=FALSE),]
+        ts <- ts(keyset$sales, start=c(2013,1), frequency=12)
+        exps <- ets(ts, model="AAA") 
+        pred_exps <- forecast(exps, 3)
+        
+        Jan_2017 <- sales_by_ym_item_store$sales[               
+                sales_by_ym_item_store$year_month==201701 & 
+                sales_by_ym_item_store$key==keylist[i]
+                ]
+        Feb_2017 <- sales_by_ym_item_store$sales[               
+                sales_by_ym_item_store$year_month==201702 & 
+                sales_by_ym_item_store$key==keylist[i]
+                ]
+        Mar_2017 <- sales_by_ym_item_store$sales[               
+                sales_by_ym_item_store$year_month==201703 & 
+                sales_by_ym_item_store$key==keylist[i]
+                ]
+        
+        Jan_2018 <- pred_exps$mean[1]
+        Feb_2018 <- pred_exps$mean[2]
+        Mar_2018 <- pred_exps$mean[3]
+        
+        Jan_2017_daily <- subset(data, year_month == 201701 & key==keylist[i])
+        Jan_2017_daily <- mutate(Jan_2017_daily, prop = sales / Jan_2017 )
+        Jan_2017_daily <- mutate(Jan_2017_daily, pred = prop * Jan_2018 ) 
+        
+        Feb_2017_daily <- subset(data, year_month == 201702 & key==keylist[i])
+        Feb_2017_daily <- mutate(Feb_2017_daily, prop = sales / Feb_2017 )
+        Feb_2017_daily <- mutate(Feb_2017_daily, pred = prop * Feb_2018 )   
+        
+        Mar_2017_daily <- subset(data, year_month == 201703 & key==keylist[i])
+        Mar_2017_daily <- mutate(Mar_2017_daily, prop = sales / Mar_2017 )
+        Mar_2017_daily <- mutate(Mar_2017_daily, pred = prop * Mar_2018 )
+        
+        all_pred <- rbind(all_pred, Jan_2017_daily)
+        all_pred <- rbind(all_pred, Feb_2017_daily)
+        all_pred <- rbind(all_pred, Mar_2017_daily)
+}
+
+tmp <- as.POSIXlt(all_pred$date)
+tmp$year <- tmp$year + 1
+all_pred$date2 <- as.Date(tmp)
+
+output <- data.frame(
+        id=rep(0, nrow(all_pred)),
+        date=all_pred$date2, 
+        store=all_pred$store,
+        item=all_pred$item,
+        sales=round(all_pred$pred)
+        )
+output <- output[order(output$item, output$store, output$date),]
+output$id <- as.integer(rownames(output))-1
+write.csv(output, file="data/forecast.csv", row.names  = FALSE)
+
+#plot actual line, fitted line and predicted line
+
+psx <- as.POSIXlt(output$date)
+output$year <- psx$year + 1900
+output$month <- psx$mon + 1
+output <- mutate(output, year_month = year*100 + month)
+
+gp_ym <- group_by(output, year_month, year, month)
+sales_by_ym <- summarize(gp_ym, sales=sum(sales))
+df_pred <- data.frame(
+        year_month=c(201801,201802,201803),
+        sales=sales_by_ym$sales,
+        type=rep("Prediction", 3)
+)
+
+
+df_combine <- rbind(df_actual, df_pred)
+plot_fit(df_combine)
+```
+
+## Conclusion
+We applied two traditional time series models, i.e. ARIMA model and Exponential Smoothing  to predict sales in next three months. Although both model nicely fitted with sales data, we chose Exponential Smoothing model through quantitative comparison of prediction errors. 
+
+
